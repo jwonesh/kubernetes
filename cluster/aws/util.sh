@@ -1180,27 +1180,28 @@ function check-cluster() {
 function kube-down {
   local vpc_id=$(get_vpc_id)
   if [[ -n "${vpc_id}" ]]; then
-    local elb_ids=$(get_elbs_in_vpc ${vpc_id})
-    if [[ -n "${elb_ids}" ]]; then
-      echo "Deleting ELBs in: ${vpc_id}"
-      for elb_id in ${elb_ids}; do
-        aws elb delete-load-balancer --load-balancer-name=${elb_id} >$LOG
-      done
+    if [[ "${PRESERVE_EXTERNAL_OBJECTS}" != "true" ]]; then
+      local elb_ids=$(get_elbs_in_vpc ${vpc_id})
+      if [[ -n "${elb_ids}" ]]; then
+        echo "Deleting ELBs in: ${vpc_id}"
+        for elb_id in ${elb_ids}; do
+          aws elb delete-load-balancer --load-balancer-name=${elb_id} >$LOG
+        done
 
-      echo "Waiting for ELBs to be deleted"
-      while true; do
-        elb_ids=$(get_elbs_in_vpc ${vpc_id})
-        if [[ -z "$elb_ids"  ]]; then
-          echo "All ELBs deleted"
-          break
-        else
-          echo "ELBs not yet deleted: $elb_ids"
-          echo "Sleeping for 3 seconds..."
-          sleep 3
-        fi
-      done
+        echo "Waiting for ELBs to be deleted"
+        while true; do
+          elb_ids=$(get_elbs_in_vpc ${vpc_id})
+          if [[ -z "$elb_ids"  ]]; then
+            echo "All ELBs deleted"
+            break
+          else
+            echo "ELBs not yet deleted: $elb_ids"
+            echo "Sleeping for 3 seconds..."
+            sleep 3
+          fi
+        done
+      fi
     fi
-
     echo "Deleting instances in VPC: ${vpc_id}"
     instance_ids=$($AWS_CMD describe-instances \
                             --filters Name=vpc-id,Values=${vpc_id} \
@@ -1230,78 +1231,80 @@ function kube-down {
       echo "All instances deleted"
     fi
 
-    echo "Cleaning up resources in VPC: ${vpc_id}"
-    default_sg_id=$($AWS_CMD describe-security-groups \
-                             --filters Name=vpc-id,Values=${vpc_id} \
-                                       Name=group-name,Values=default \
-                             --query SecurityGroups[].GroupId \
-                    | tr "\t" "\n")
-    sg_ids=$($AWS_CMD describe-security-groups \
-                      --filters Name=vpc-id,Values=${vpc_id} \
-                                Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
-                      --query SecurityGroups[].GroupId \
-             | tr "\t" "\n")
-    # First delete any inter-security group ingress rules
-    # (otherwise we get dependency violations)
-    for sg_id in ${sg_ids}; do
-      # EC2 doesn't let us delete the default security group
-      if [[ "${sg_id}" == "${default_sg_id}" ]]; then
-        continue
-      fi
+    if [[ "${PRESERVE_EXTERNAL_OBJECTS}" != "true" ]]; then
+      echo "Cleaning up resources in VPC: ${vpc_id}"
+      default_sg_id=$($AWS_CMD describe-security-groups \
+                               --filters Name=vpc-id,Values=${vpc_id} \
+                                         Name=group-name,Values=default \
+                               --query SecurityGroups[].GroupId \
+                      | tr "\t" "\n")
+      sg_ids=$($AWS_CMD describe-security-groups \
+                        --filters Name=vpc-id,Values=${vpc_id} \
+                                  Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
+                        --query SecurityGroups[].GroupId \
+               | tr "\t" "\n")
+      # First delete any inter-security group ingress rules
+      # (otherwise we get dependency violations)
+      for sg_id in ${sg_ids}; do
+        # EC2 doesn't let us delete the default security group
+        if [[ "${sg_id}" == "${default_sg_id}" ]]; then
+          continue
+        fi
 
-      echo "Cleaning up security group: ${sg_id}"
-      other_sgids=$(${AWS_CMD} describe-security-groups --group-id "${sg_id}" --query SecurityGroups[].IpPermissions[].UserIdGroupPairs[].GroupId)
-      for other_sgid in ${other_sgids}; do
-        $AWS_CMD revoke-security-group-ingress --group-id "${sg_id}" --source-group "${other_sgid}" --protocol all > $LOG
+        echo "Cleaning up security group: ${sg_id}"
+        other_sgids=$(${AWS_CMD} describe-security-groups --group-id "${sg_id}" --query SecurityGroups[].IpPermissions[].UserIdGroupPairs[].GroupId)
+        for other_sgid in ${other_sgids}; do
+          $AWS_CMD revoke-security-group-ingress --group-id "${sg_id}" --source-group "${other_sgid}" --protocol all > $LOG
+        done
       done
-    done
 
-    for sg_id in ${sg_ids}; do
-      # EC2 doesn't let us delete the default security group
-      if [[ "${sg_id}" == "${default_sg_id}" ]]; then
-        continue
-      fi
+      for sg_id in ${sg_ids}; do
+        # EC2 doesn't let us delete the default security group
+        if [[ "${sg_id}" == "${default_sg_id}" ]]; then
+          continue
+        fi
 
-      echo "Deleting security group: ${sg_id}"
-      $AWS_CMD delete-security-group --group-id ${sg_id} > $LOG
-    done
+        echo "Deleting security group: ${sg_id}"
+        $AWS_CMD delete-security-group --group-id ${sg_id} > $LOG
+      done
 
-    subnet_ids=$($AWS_CMD describe-subnets \
-                          --filters Name=vpc-id,Values=${vpc_id} \
-                                    Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
-                          --query Subnets[].SubnetId \
-             | tr "\t" "\n")
-    for subnet_id in ${subnet_ids}; do
-      $AWS_CMD delete-subnet --subnet-id ${subnet_id} > $LOG
-    done
+      subnet_ids=$($AWS_CMD describe-subnets \
+                            --filters Name=vpc-id,Values=${vpc_id} \
+                                      Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
+                            --query Subnets[].SubnetId \
+               | tr "\t" "\n")
+      for subnet_id in ${subnet_ids}; do
+        $AWS_CMD delete-subnet --subnet-id ${subnet_id} > $LOG
+      done
 
-    igw_ids=$($AWS_CMD describe-internet-gateways \
-                       --filters Name=attachment.vpc-id,Values=${vpc_id} \
-                       --query InternetGateways[].InternetGatewayId \
-             | tr "\t" "\n")
-    for igw_id in ${igw_ids}; do
-      $AWS_CMD detach-internet-gateway --internet-gateway-id $igw_id --vpc-id $vpc_id > $LOG
-      $AWS_CMD delete-internet-gateway --internet-gateway-id $igw_id > $LOG
-    done
+      igw_ids=$($AWS_CMD describe-internet-gateways \
+                         --filters Name=attachment.vpc-id,Values=${vpc_id} \
+                         --query InternetGateways[].InternetGatewayId \
+               | tr "\t" "\n")
+      for igw_id in ${igw_ids}; do
+        $AWS_CMD detach-internet-gateway --internet-gateway-id $igw_id --vpc-id $vpc_id > $LOG
+        $AWS_CMD delete-internet-gateway --internet-gateway-id $igw_id > $LOG
+      done
 
-    route_table_ids=$($AWS_CMD describe-route-tables \
-                               --filters Name=vpc-id,Values=$vpc_id \
-                                         Name=route.destination-cidr-block,Values=0.0.0.0/0 \
-                               --query RouteTables[].RouteTableId \
-                      | tr "\t" "\n")
-    for route_table_id in ${route_table_ids}; do
-      $AWS_CMD delete-route --route-table-id $route_table_id --destination-cidr-block 0.0.0.0/0 > $LOG
-    done
-    route_table_ids=$($AWS_CMD describe-route-tables \
-                               --filters Name=vpc-id,Values=$vpc_id \
-                                         Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
-                               --query RouteTables[].RouteTableId \
-                      | tr "\t" "\n")
-    for route_table_id in ${route_table_ids}; do
-      $AWS_CMD delete-route-table --route-table-id $route_table_id > $LOG
-    done
+      route_table_ids=$($AWS_CMD describe-route-tables \
+                                 --filters Name=vpc-id,Values=$vpc_id \
+                                           Name=route.destination-cidr-block,Values=0.0.0.0/0 \
+                                 --query RouteTables[].RouteTableId \
+                        | tr "\t" "\n")
+      for route_table_id in ${route_table_ids}; do
+        $AWS_CMD delete-route --route-table-id $route_table_id --destination-cidr-block 0.0.0.0/0 > $LOG
+      done
+      route_table_ids=$($AWS_CMD describe-route-tables \
+                                 --filters Name=vpc-id,Values=$vpc_id \
+                                           Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
+                                 --query RouteTables[].RouteTableId \
+                        | tr "\t" "\n")
+      for route_table_id in ${route_table_ids}; do
+        $AWS_CMD delete-route-table --route-table-id $route_table_id > $LOG
+      done
 
-    $AWS_CMD delete-vpc --vpc-id $vpc_id > $LOG
+      $AWS_CMD delete-vpc --vpc-id $vpc_id > $LOG
+    fi
   fi
 }
 
