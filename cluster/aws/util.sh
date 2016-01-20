@@ -840,7 +840,11 @@ function kube-up {
       $AWS_CMD attach-volume --volume-id ${MASTER_DISK_ID} --device /dev/sdb --instance-id ${master_id}
 
       sleep 10
+     { 
       $AWS_CMD create-route --route-table-id $ROUTE_TABLE_ID --destination-cidr-block ${MASTER_IP_RANGE} --instance-id $master_id > $LOG
+     } || {
+      echo "Continuing..."
+     }
 
       break
     fi
@@ -1054,6 +1058,7 @@ function kube-up {
 function kube-down {
   local vpc_id=$(get_vpc_id)
   if [[ -n "${vpc_id}" ]]; then
+   if [[ "${PRESERVE_EXTERNAL_OBJECTS}" != "true" ]]; then
     local elb_ids=$(get_elbs_in_vpc ${vpc_id})
     if [[ -n "${elb_ids}" ]]; then
       echo "Deleting ELBs in: ${vpc_id}"
@@ -1073,6 +1078,7 @@ function kube-down {
           sleep 3
         fi
       done
+     fi
     fi
 
     if [[ -n $(${AWS_ASG_CMD} --output text describe-auto-scaling-groups --auto-scaling-group-names ${ASG_NAME} --query AutoScalingGroups[].AutoScalingGroupName) ]]; then
@@ -1104,7 +1110,7 @@ function kube-down {
         fi
       done
     fi
-
+   if [[ "${PRESERVE_EXTERNAL_OBJECTS}" != "true" ]]; then
     echo "Deleting VPC: ${vpc_id}"
     default_sg_id=$($AWS_CMD --output text describe-security-groups \
                              --filters Name=vpc-id,Values=${vpc_id} \
@@ -1177,8 +1183,12 @@ function kube-down {
     done
 
     $AWS_CMD delete-vpc --vpc-id $vpc_id > $LOG
+   fi
   fi
 }
+
+
+
 
 # Update a kubernetes cluster with latest source
 function kube-push {
